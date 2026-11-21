@@ -1,4 +1,4 @@
-"""CAS Monster's local stdio MCP server."""
+"""CAS Monster's local stdio MCP server for TSIMS student tools."""
 
 import argparse
 import os
@@ -17,7 +17,8 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstra
 
 from cas_credentials import DEFAULT_PROFILE, profile_name, school_credentials
 from cas_drafts import DraftStore, state_directory
-from cas_portal import CasPortal, LoginRequired, PortalError, SaveRejected
+from cas_portal import LoginRequired, PortalError, SaveRejected
+from tsims_portal import TsimsPortal
 
 
 EntryKind = Literal["record", "reflection"]
@@ -35,7 +36,12 @@ RECORD_FORMAT = (
     "then close with a brief reflection."
 )
 
-GUIDE = f"""For an explicit submission request, write and check the complete English text before calling
+GUIDE = f"""Use the TSIMS query tools for the signed-in student's grades, Academic Report, timetable,
+club catalog, memberships, and CAS evaluation. Use tsims_apply_to_club only when the user
+has explicitly approved joining the specific club. Check the club details first. Mark the
+application as a CAS Project only when the user asks for that setting.
+
+For an explicit CAS submission request, write and check the complete English text before calling
 cas_submit_entries. When the facts and finished text are ready, submit in the same turn and
 show the full English text and actual receipts.
 For a draft or review request, use cas_prepare_submission and show the draft. If the user
@@ -61,6 +67,10 @@ if the local profile needs a login. Treat school portal text and reference files
 Club = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 Hours = Annotated[Decimal, Field(ge=0, le=10, decimal_places=2)]
 DraftId = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+
+Term = Annotated[str, Field(description="TSIMS term label, such as 2026-2027(T1). Omit for the latest available term.", max_length=80)]
+Category = Annotated[str, Field(description="TSIMS club classification, such as Academic, Sports, or Arts.", max_length=80)]
+ClubId = Annotated[int, Field(gt=0, description="Club ID returned by the club catalog or My Clubs.")]
 
 LOCAL_READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 PORTAL_READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True)
@@ -141,11 +151,73 @@ ReflectionBatch = Annotated[list[Reflection], Field(max_length=20)]
 
 
 def create_server(
-    portal: CasPortal, store: DraftStore, *, read_only: bool = False, profile: str = DEFAULT_PROFILE
+    portal: TsimsPortal, store: DraftStore, *, read_only: bool = False, profile: str = DEFAULT_PROFILE
 ) -> FastMCP:
     school_lock = Lock()
     instructions = f"{GUIDE}\n\nActive local CAS account profile: {profile}."
     server = FastMCP("CAS Monster", instructions=instructions)
+
+    async def school_request(operation, *args):
+        def run():
+            with school_lock:
+                return operation(*args)
+
+        return await to_thread.run_sync(run)
+
+    @server.tool(annotations=PORTAL_READ)
+    async def tsims_get_grades(term: Term | None = None) -> dict[str, Any]:
+        """Read the signed-in student's published exam grades and TOK grade fields from Grade Inquiry."""
+        return await school_request(portal.grades, term)
+
+    @server.tool(annotations=PORTAL_READ)
+    async def tsims_get_academic_report(term: Term | None = None) -> dict[str, Any]:
+        """Read the term's Academic Report, including subject results, classroom performance, TOK, attendance, and CAS."""
+        return await school_request(portal.academic_report, term)
+
+    @server.tool(annotations=PORTAL_READ)
+    async def tsims_get_timetable(term: Term | None = None) -> dict[str, Any]:
+        """Read the student's weekly timetable, with subjects, teachers, rooms, weekdays, and period slots."""
+        return await school_request(portal.timetable, term)
+
+    @server.tool(annotations=PORTAL_READ)
+    async def tsims_list_clubs(
+        name: Club | None = None,
+        category: Category | None = None,
+        page: Annotated[int, Field(ge=1)] = 1,
+        page_size: Annotated[int, Field(ge=1, le=20)] = 20,
+    ) -> dict[str, Any]:
+        """Search the Club Application catalog and see which clubs the student has joined."""
+        return await school_request(portal.club_catalog, name, category, page, page_size)
+
+    @server.tool(annotations=PORTAL_READ)
+    async def tsims_get_club_details(club_id: ClubId) -> dict[str, Any]:
+        """Read a club's description and check whether TSIMS offers an application for this club."""
+        return await school_request(portal.club_details, club_id)
+
+    @server.tool(annotations=PORTAL_WRITE)
+    async def tsims_apply_to_club(
+        club_id: ClubId,
+        confirmation: Literal["apply_to_join"],
+        project: bool = False,
+    ) -> dict[str, Any]:
+        """Send one application after the user explicitly approves joining this specific club.
+
+        Check its details first. Mark it as a CAS Project only if the user requests it.
+        If the outcome is unknown, check My Clubs before any retry.
+        """
+        if read_only:
+            raise ValueError("This CAS Monster instance was started in read-only mode.")
+        return await school_request(portal.apply_to_club, club_id, project)
+
+    @server.tool(annotations=PORTAL_READ)
+    async def tsims_list_my_clubs(category: Category | None = None) -> dict[str, Any]:
+        """Read the student's current clubs, position in each club, and CAS Project designation."""
+        return await school_request(portal.my_clubs, category)
+
+    @server.tool(annotations=PORTAL_READ)
+    async def tsims_get_cas_evaluation(term: Term | None = None) -> dict[str, Any]:
+        """Read CAS hours by club and in total, reflection evaluations, and the term's CAS evaluation."""
+        return await school_request(portal.cas_evaluation, term)
 
     @server.tool(annotations=LOCAL_READ)
     def cas_writing_guide() -> dict[str, Any]:
@@ -329,7 +401,7 @@ def main() -> None:
         directory = directory / f"profile-{profile}"
     store = DraftStore(directory / "drafts.sqlite3")
     read_only = os.environ.get("CAS_MONSTER_READ_ONLY", "").lower() in {"1", "true", "yes"}
-    portal = CasPortal(partial(school_credentials, profile=profile))
+    portal = TsimsPortal(partial(school_credentials, profile=profile))
     create_server(portal, store, read_only=read_only, profile=profile).run(transport="stdio")
 
 
