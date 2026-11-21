@@ -32,9 +32,25 @@ RECORD = {
     "c_hours": 1.25,
 }
 REFLECTION = {
-    "club": "Conversation", "title": "Learning through testing", "summary": "I revised my design.",
-    "content": "I compared A & <B>.\n\nNext time I will measure first.", "outcomes": ["New Skills", "Challenge"],
+    "club": "Conversation",
+    "title": "Learning Through Careful Testing",
+    "summary": (
+        "I learned to test more carefully by comparing my own work with a partner and discussing the differences together."
+    ),
+    "content": (
+        "I compared A & <B>. " + " ".join(["word"] * 121) + ".\n\n"
+        "Next time I will measure first. " + " ".join(["word"] * 119) + "."
+    ),
+    "outcomes": ["New Skills", "Challenge"],
 }
+
+
+def reflection_body(words, paragraph_count):
+    per_paragraph, remainder = divmod(words, paragraph_count)
+    return "\n\n".join(
+        " ".join(["word"] * (per_paragraph + (index < remainder))) + "."
+        for index in range(paragraph_count)
+    )
 
 
 class FixtureHandler(BaseHTTPRequestHandler):
@@ -145,7 +161,9 @@ class CasMcpTests(unittest.IsolatedAsyncioTestCase):
                 }),
                 ("/Stu/Cas/SaveReflection", {
                     "id": "0", "GroupId": "8", "Title": REFLECTION["title"], "Summary": REFLECTION["summary"],
-                    "Content": "I compared A &amp; &lt;B&gt;.<br />\r\n<br />\r\nNext time I will measure first.",
+                    "Content": REFLECTION["content"].replace("A & <B>", "A &amp; &lt;B&gt;").replace(
+                        "\n", "<br />\r\n"
+                    ),
                     "outcome": "2,8",
                 }),
             ])
@@ -162,7 +180,7 @@ class CasMcpTests(unittest.IsolatedAsyncioTestCase):
         async with create_connected_server_and_client_session(create_server(self.portal, self.store)) as client:
             draft = await self.call(client, "cas_prepare_submission", {
                 "records": [RECORD],
-                "reflections": [REFLECTION, {**REFLECTION, "title": "Second reflection"}],
+                "reflections": [REFLECTION, {**REFLECTION, "title": "A Second Look at Testing"}],
             })
             params = {"draft_id": draft["draft_id"], "confirmation": "submit_reviewed_draft"}
             result = await self.call(client, "cas_submit", params)
@@ -223,6 +241,65 @@ class CasMcpTests(unittest.IsolatedAsyncioTestCase):
             })
             self.assertTrue(result.isError)
             self.assertIn("120–180 English words", result.content[0].text)
+            self.assertEqual(self.school.writes, [])
+
+    async def test_reflection_hard_limits_are_enforced_for_drafting_and_direct_submission(self):
+        club = {**REFLECTION, "club": "Fixture Club", "content": reflection_body(550, 4)}
+        async with create_connected_server_and_client_session(create_server(self.portal, self.store)) as client:
+            tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+            for name in ("cas_prepare_submission", "cas_submit_entries"):
+                self.assertIn("at least 550 words in 4–7 paragraphs", tools[name].description)
+                self.assertIn("at least 250 words in 2–4 paragraphs", tools[name].description)
+                self.assertIn("18–22 words", tools[name].description)
+                for entry, error in (
+                    ({**REFLECTION, "title": "Too short"}, "Reflection title must have 4–10 words"),
+                    ({**REFLECTION, "title": REFLECTION["title"] + "."}, "without quotation marks or ending punctuation"),
+                    ({**REFLECTION, "title": '"' + REFLECTION["title"] + '"'}, "without quotation marks"),
+                    ({**REFLECTION, "summary": " ".join(["word"] * 17) + "."}, "Reflection summary must have 18–22 words"),
+                    ({**REFLECTION, "summary": " ".join(["word"] * 23) + "."}, "Reflection summary must have 18–22 words"),
+                    ({**REFLECTION, "summary": REFLECTION["summary"].rstrip(".")}, "one unquoted sentence"),
+                    ({**REFLECTION, "summary": "I learned from the tests. " + " ".join(["word"] * 13) + "."}, "one unquoted sentence"),
+                    ({**REFLECTION, "content": reflection_body(249, 2)}, "Conversation body must have at least 250 words"),
+                    ({**REFLECTION, "content": reflection_body(250, 1)}, "Conversation body must have 2–4 paragraphs"),
+                    ({**REFLECTION, "content": reflection_body(250, 5)}, "Conversation body must have 2–4 paragraphs"),
+                    ({**REFLECTION, "content": "- " + REFLECTION["content"]}, "without labels or Markdown"),
+                    ({**REFLECTION, "content": REFLECTION["title"] + "\n\n" + REFLECTION["content"]}, "title field only"),
+                    ({**club, "content": reflection_body(549, 4)}, "Club reflection body must have at least 550 words"),
+                    ({**club, "content": reflection_body(550, 3)}, "Club reflection body must have 4–7 paragraphs"),
+                    ({**club, "content": reflection_body(550, 8)}, "Club reflection body must have 4–7 paragraphs"),
+                ):
+                    with self.subTest(tool=name, error=error):
+                        invalid = await client.call_tool(name, {"records": [RECORD], "reflections": [entry]})
+                        self.assertTrue(invalid.isError)
+                        self.assertIn(error, invalid.content[0].text)
+                        self.assertEqual(self.school.writes, [])
+
+    async def test_reflection_targets_do_not_override_the_hard_minimums(self):
+        club = {**REFLECTION, "club": "Fixture Club", "content": reflection_body(550, 4)}
+        long_club = {**club, "content": reflection_body(751, 7)}
+        conversation = {
+            **REFLECTION, "club": "谈话记录(Conversation)",
+            "summary": "I studied U.S. history with my partner and used the discussion to improve the way I compare different sources.",
+            "content": reflection_body(351, 4).replace("\n\n", "\r\n \r\n"),
+        }
+        async with create_connected_server_and_client_session(create_server(self.portal, self.store)) as client:
+            preview = await self.call(client, "cas_prepare_submission", {"reflections": [long_club, conversation]})
+            self.assertEqual(preview["state"], "prepared")
+            result = await self.call(client, "cas_submit_entries", {"reflections": [club, REFLECTION]})
+            self.assertEqual(result["state"], "submitted")
+            self.assertEqual([form["GroupId"] for _, form in self.school.writes], ["7", "8"])
+
+    async def test_existing_draft_with_short_reflection_is_rejected_before_any_write(self):
+        draft_id = self.store.prepare({
+            "record": [RECORD],
+            "reflection": [{**REFLECTION, "content": "I learned a lot."}],
+        }, "fixture-user")
+        async with create_connected_server_and_client_session(create_server(self.portal, self.store)) as client:
+            result = await client.call_tool("cas_submit", {
+                "draft_id": draft_id, "confirmation": "submit_reviewed_draft",
+            })
+            self.assertTrue(result.isError)
+            self.assertIn("Conversation body must have at least 250 words", result.content[0].text)
             self.assertEqual(self.school.writes, [])
 
     async def test_form_rejects_non_latin_text_and_unknown_outcomes(self):

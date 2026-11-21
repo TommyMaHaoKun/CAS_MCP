@@ -230,6 +230,8 @@ qwen
 
 活动标题、描述以及反思的标题、摘要和正文都用英文。每条活动记录须写 120–180 个英文词，分 1–2 段。说明活动内容和自己做了什么，结尾简短反思。表单的社团选项使用学校显示的原名。学校表单的八项 Learning Outcomes 为 Awareness、Challenge、Initiative、Collaboration、Commitment、Global Value、Ethics 和 New Skills。
 
+Reflection 的标题须为 4–10 个英文词，摘要须为以句末标点结尾的 18–22 词单句。正文用纯文本分段。社团反思至少 550 词、4–7 段，建议 600–750 词。Conversation 是整学期的 CAS 反思，至少 250 词、2–4 段，建议 250–350 词。
+
 批量填报时，每条记录都应对应实际活动。出现 `unknown` 回执时，先查学校记录确认该条是否已写入，再决定是否重新提交。
 
 ## 查询 TSIMS

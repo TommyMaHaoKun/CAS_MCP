@@ -8,7 +8,7 @@ from decimal import Decimal
 from functools import partial
 from threading import Lock
 from typing import Annotated, Any, Literal, get_args
-from unicodedata import name as unicode_name
+from unicodedata import category as unicode_category, name as unicode_name
 
 from anyio import to_thread
 from mcp.server.fastmcp import FastMCP
@@ -36,6 +36,32 @@ RECORD_FORMAT = (
     "then close with a brief reflection."
 )
 
+CONVERSATION_CLUB_NAMES = {"conversation", "谈话记录(conversation)"}
+REFLECTION_TITLE_WORDS = (4, 10)
+REFLECTION_SUMMARY_WORDS = (18, 22)
+CLUB_REFLECTION_MIN_WORDS = 550
+CLUB_REFLECTION_PARAGRAPHS = (4, 7)
+CONVERSATION_MIN_WORDS = 250
+CONVERSATION_PARAGRAPHS = (2, 4)
+
+REFLECTION_TITLE_FORMAT = (
+    f"Write an English title of {REFLECTION_TITLE_WORDS[0]}–{REFLECTION_TITLE_WORDS[1]} words on one line "
+    "without a label, quotation marks, or ending punctuation."
+)
+REFLECTION_SUMMARY_FORMAT = (
+    f"Write one English sentence of {REFLECTION_SUMMARY_WORDS[0]}–{REFLECTION_SUMMARY_WORDS[1]} words "
+    "on one line without a label or quotation marks, ending with a period, question mark, or exclamation point."
+)
+REFLECTION_BODY_FORMAT = (
+    f"For club reflections, write at least {CLUB_REFLECTION_MIN_WORDS} words in "
+    f"{CLUB_REFLECTION_PARAGRAPHS[0]}–{CLUB_REFLECTION_PARAGRAPHS[1]} paragraphs (aim for 600–750 words). "
+    f"For Conversation, write at least {CONVERSATION_MIN_WORDS} words in "
+    f"{CONVERSATION_PARAGRAPHS[0]}–{CONVERSATION_PARAGRAPHS[1]} paragraphs (aim for 250–350 words). "
+    "Use plain English prose with blank lines between paragraphs. Put the title and summary in their own "
+    "fields and omit headings, bullet points, and Markdown from the body."
+)
+REFLECTION_FORMAT = f"{REFLECTION_TITLE_FORMAT} {REFLECTION_SUMMARY_FORMAT} {REFLECTION_BODY_FORMAT}"
+
 GUIDE = f"""Use the TSIMS query tools for the signed-in student's grades, Academic Report, timetable,
 club catalog, memberships, and CAS evaluation. Use tsims_apply_to_club only when the user
 has explicitly approved joining the specific club. Check the club details first. Mark the
@@ -54,9 +80,11 @@ Draft from facts supplied by the student. Ask for a missing date, club, or hours
 For every activity record, follow this format: {RECORD_FORMAT}
 If the supplied facts are too sparse to write a complete record, ask what the student did.
 Use 0 for omitted C/A/S categories once the student has provided their hours.
-For a reflection, write a short title, a one-sentence summary of about 20 words, and
-a body grounded in the experience. The website aims for 600–750 words for club reflections
-and 250–350 for Conversation. Conversation is a semester reflection across C/A/S.
+For every reflection, follow this format: {REFLECTION_FORMAT}
+Put the title and summary in their own fields. In the body, use paragraphs of prose
+grounded in the student's experience. For a club reflection, use 6–10 concrete details in
+the first 70–85% and reserve general observations for the last paragraph. Conversation reflects
+on the whole semester across Creativity, Activity, and Service, with specific examples and growth.
 Select Learning Outcomes supported by the experience. The school form offers
 {", ".join(OUTCOME_IDS)}. Use the school materials the student provides as guidance.
 For weekly batches, use cas_weekly_dates for dates, then draft each occurrence from
@@ -85,19 +113,79 @@ def english_form_text(value: str) -> str:
     return value
 
 
+def count_words(text: str) -> int:
+    return len(re.findall(r"[^\W\d_]+(?:[’'-][^\W\d_]+)*", text))
+
+
+def paragraphs(text: str) -> list[str]:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return [part.strip() for part in re.split(r"\n\s*\n", normalized) if part.strip()]
+
+
+REFLECTION_LABEL = re.compile(
+    r"^[ \t]*(?:title|summary|body|(?:club |activity |cas )?reflection|introduction|conclusion)\s*:",
+    re.IGNORECASE | re.MULTILINE,
+)
+REFLECTION_MARKDOWN = re.compile(
+    r"^[ \t]*(?:#{1,6}\s+|>+\s*|[-+*•]\s+|[0-9]+[.)]\s+|`{3,}|~{3,})"
+    r"|^[ \t]*(?:[-*_][ \t]*){3,}$|^[ \t]*={2,}[ \t]*$"
+    r"|(?<!\w)[*_]{1,2}\S[^*_\n]*?[*_]{1,2}(?!\w)"
+    r"|~~[^~\n]+~~|`[^`\n]+`|\[[^\]\n]+\]\([^)]+\)",
+    re.MULTILINE,
+)
+QUOTATION_MARK = re.compile(r"""["“”«»]|(?<!\w)['‘][^'\r\n]+['’](?!\w)""")
+SENTENCE_ABBREVIATION = re.compile(r"\b(?:(?:[A-Za-z]\.){2,}|(?:Mr|Ms|Mrs|Dr|Prof|St|vs)\.)")
+
+
+def check_word_range(text: str, limits: tuple[int, int], field: str) -> None:
+    minimum, maximum = limits
+    count = count_words(text)
+    if not minimum <= count <= maximum:
+        raise ValueError(f"{field} must have {minimum}–{maximum} words. Received {count}.")
+
+
+def check_reflection_prose(text: str, field: str) -> None:
+    if REFLECTION_LABEL.search(text) or REFLECTION_MARKDOWN.search(text):
+        raise ValueError(f"{field} must be plain text without labels or Markdown.")
+
+
+@AfterValidator
+def reflection_title_text(value: str) -> str:
+    check_word_range(value, REFLECTION_TITLE_WORDS, "Reflection title")
+    check_reflection_prose(value, "Reflection title")
+    if len(value.splitlines()) != 1 or QUOTATION_MARK.search(value) or unicode_category(value[-1]).startswith("P"):
+        raise ValueError("Reflection title must be one line without quotation marks or ending punctuation.")
+    return value
+
+
+@AfterValidator
+def reflection_summary_text(value: str) -> str:
+    check_word_range(value, REFLECTION_SUMMARY_WORDS, "Reflection summary")
+    check_reflection_prose(value, "Reflection summary")
+    before_ending = SENTENCE_ABBREVIATION.sub("", value.rstrip(".!?"))
+    if (
+        len(value.splitlines()) != 1
+        or QUOTATION_MARK.search(value)
+        or not value.endswith((".", "!", "?"))
+        or re.search(r"[.!?][)\]]*(?=\s|$)", before_ending)
+    ):
+        raise ValueError("Reflection summary must be one unquoted sentence on one line with ending punctuation.")
+    return value
+
+
 @AfterValidator
 def activity_record_text(value: str) -> str:
-    word_count = len(re.findall(r"[^\W\d_]+(?:[’'-][^\W\d_]+)*", value))
+    word_count = count_words(value)
     if not RECORD_MIN_WORDS <= word_count <= RECORD_MAX_WORDS:
         raise ValueError(
             f"An activity record description must have {RECORD_MIN_WORDS}–{RECORD_MAX_WORDS} "
             f"English words. This description has {word_count}."
         )
-    paragraphs = [part for part in re.split(r"\n\s*\n", value) if part.strip()]
-    if len(paragraphs) > 2:
+    paragraph_count = len(paragraphs(value))
+    if paragraph_count > 2:
         raise ValueError(
             "An activity record description must have 1–2 paragraphs. "
-            f"This description has {len(paragraphs)}."
+            f"This description has {paragraph_count}."
         )
     return value
 
@@ -135,10 +223,43 @@ class Record(BaseModel):
 class Reflection(BaseModel):
     model_config = ConfigDict(extra="forbid")
     club: Club
-    title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200), english_form_text]
-    summary: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500), english_form_text]
-    content: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20000), english_form_text]
+    title: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200),
+        english_form_text, reflection_title_text, Field(description=REFLECTION_TITLE_FORMAT),
+    ]
+    summary: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500),
+        english_form_text, reflection_summary_text, Field(description=REFLECTION_SUMMARY_FORMAT),
+    ]
+    content: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20000),
+        english_form_text, Field(description=REFLECTION_BODY_FORMAT),
+    ]
     outcomes: Annotated[list[Outcome], Field(min_length=1, max_length=8)]
+
+    @model_validator(mode="after")
+    def check_body(self):
+        check_reflection_prose(self.content, "Reflection body")
+        if re.sub(r"\s+", "", self.club).casefold() in CONVERSATION_CLUB_NAMES:
+            if re.search(r"\b(?:Conversation\s+Club|Club\s+Conversation)\b",
+                         f"{self.title} {self.summary} {self.content}", re.IGNORECASE):
+                raise ValueError("Conversation reflects on the full CAS semester across clubs and activities.")
+            minimum, limits = CONVERSATION_MIN_WORDS, CONVERSATION_PARAGRAPHS
+            kind = "Conversation"
+        else:
+            minimum, limits = CLUB_REFLECTION_MIN_WORDS, CLUB_REFLECTION_PARAGRAPHS
+            kind = "Club reflection"
+        words = count_words(self.content)
+        if words < minimum:
+            raise ValueError(f"{kind} body must have at least {minimum} words. Received {words}.")
+        body_paragraphs = paragraphs(self.content)
+        if body_paragraphs[0].splitlines()[0].strip().casefold() == self.title.casefold():
+            raise ValueError("Put the reflection title in the title field only.")
+        if not limits[0] <= len(body_paragraphs) <= limits[1]:
+            raise ValueError(
+                f"{kind} body must have {limits[0]}–{limits[1]} paragraphs. Received {len(body_paragraphs)}."
+            )
+        return self
 
     def submission(self) -> dict:
         entry = self.model_dump(mode="json")
@@ -282,7 +403,7 @@ def create_server(
         annotations=LOCAL_DRAFT,
         description=(
             "Stage English entries for review and show the full draft. For each activity record: "
-            f"{RECORD_FORMAT}"
+            f"{RECORD_FORMAT} For each reflection, follow this format: {REFLECTION_FORMAT}"
         ),
     )
     def cas_prepare_submission(
@@ -298,8 +419,9 @@ def create_server(
         annotations=PORTAL_WRITE,
         description=(
             "Submit complete English entries when the user explicitly asks, including on the first turn. "
-            f"For each activity record: {RECORD_FORMAT} "
-            "Write and check every description before calling. If the activity details are too sparse, "
+            f"For each activity record, follow this format: {RECORD_FORMAT} "
+            f"For each reflection, follow this format: {REFLECTION_FORMAT} "
+            "Write and check every entry before calling. If the activity details are too sparse, "
             "ask what the student did. Use one record per date for weekly batches. "
             "Show the full English text and actual receipts in the same reply."
         ),
