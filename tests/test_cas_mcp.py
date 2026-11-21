@@ -78,6 +78,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self.send_result({"TotalCount": 1, "List": [
                 {"Id": 1, "Theme": "Model bridges", "StudentNo": "fixture-user", "Reflection": "Draft prose"},
             ]})
+        elif path.endswith("GetReflectionList"):
+            self.send_result({"TotalCount": 0, "List": []})
         else:
             self.send_error(404)
 
@@ -157,6 +159,52 @@ class CasMcpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await self.call(client, "cas_submit", params), result)
             self.assertEqual(len(self.school.writes), 2)
 
+    async def test_direct_submit_returns_full_articles_with_receipts(self):
+        async with create_connected_server_and_client_session(create_server(self.portal, self.store)) as client:
+            result = await self.call(client, "cas_submit_entries", {"records": [RECORD], "reflections": [REFLECTION]})
+            self.assertEqual(result["state"], "submitted")
+            self.assertEqual([item["state"] for item in result["receipts"]], ["confirmed", "confirmed"])
+            self.assertEqual(result["records"][0]["theme"], self.school.writes[0][1]["Theme"])
+            self.assertEqual(result["records"][0]["description"], self.school.writes[0][1]["Reflection"])
+            self.assertEqual(result["reflections"][0]["title"], REFLECTION["title"])
+            self.assertEqual(result["reflections"][0]["content"], REFLECTION["content"])
+            self.assertEqual(result["reflections"][0]["outcomes"], ["Challenge", "New Skills"])
+            self.assertEqual(await self.call(
+                client, "cas_submit_entries", {"records": [RECORD], "reflections": [REFLECTION]},
+            ), result)
+            self.assertEqual(len(self.school.writes), 2)
+
+    async def test_form_rejects_non_latin_text_and_unknown_outcomes(self):
+        async with create_connected_server_and_client_session(create_server(self.portal, self.store)) as client:
+            guide = await self.call(client, "cas_writing_guide")
+            self.assertEqual(guide["learning_outcomes"], [
+                "Awareness", "Challenge", "Initiative", "Collaboration",
+                "Commitment", "Global Value", "Ethics", "New Skills",
+            ])
+            for kind, entry in (
+                ("records", {**RECORD, "theme": "桥梁模型"}),
+                ("records", {**RECORD, "description": "We compared 两个模型."}),
+                ("reflections", {**REFLECTION, "title": "活动反思"}),
+                ("reflections", {**REFLECTION, "summary": "活动简介"}),
+                ("reflections", {**REFLECTION, "content": "正文"}),
+                ("reflections", {**REFLECTION, "outcomes": ["Teamwork"]}),
+            ):
+                for tool in ("cas_prepare_submission", "cas_submit_entries"):
+                    invalid = await client.call_tool(tool, {kind: [entry]})
+                    self.assertTrue(invalid.isError, (tool, entry))
+            self.assertEqual(self.school.writes, [])
+
+    async def test_existing_draft_with_non_latin_title_is_not_posted(self):
+        draft_id = self.store.prepare({
+            "record": [], "reflection": [{**REFLECTION, "title": "旧版反思标题"}],
+        }, "fixture-user")
+        async with create_connected_server_and_client_session(create_server(self.portal, self.store)) as client:
+            result = await client.call_tool("cas_submit", {
+                "draft_id": draft_id, "confirmation": "submit_reviewed_draft",
+            })
+            self.assertTrue(result.isError)
+            self.assertEqual(self.school.writes, [])
+
     async def test_read_only_and_invalid_hours(self):
         async with create_connected_server_and_client_session(
             create_server(self.portal, self.store, read_only=True)
@@ -168,6 +216,8 @@ class CasMcpTests(unittest.IsolatedAsyncioTestCase):
                 "draft_id": draft["draft_id"], "confirmation": "submit_reviewed_draft",
             })
             self.assertTrue(result.isError)
+            direct = await client.call_tool("cas_submit_entries", {"records": [RECORD]})
+            self.assertTrue(direct.isError)
             self.assertEqual(self.school.writes, [])
 
     async def test_draft_receipts_belong_to_school_login(self):
