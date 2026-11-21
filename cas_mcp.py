@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import re
 from datetime import date, timedelta
 from decimal import Decimal
 from functools import partial
@@ -26,9 +27,17 @@ Outcome = Literal[
 ]
 OUTCOME_IDS = {name: str(i) for i, name in enumerate(get_args(Outcome), start=1)}
 
-GUIDE = f"""For an explicit submission request, submit and show the full English article and receipts in one reply.
-Call cas_submit_entries when the required facts are available, including on the first
-message. Report the actual result without waiting for a second confirmation.
+RECORD_MIN_WORDS = 120
+RECORD_MAX_WORDS = 180
+RECORD_FORMAT = (
+    f"Write {RECORD_MIN_WORDS}–{RECORD_MAX_WORDS} English words in 1–2 paragraphs, "
+    "with a blank line between paragraphs. Describe the activity and what the student did, "
+    "then close with a brief reflection."
+)
+
+GUIDE = f"""For an explicit submission request, write and check the complete English text before calling
+cas_submit_entries. When the facts and finished text are ready, submit in the same turn and
+show the full English text and actual receipts.
 For a draft or review request, use cas_prepare_submission and show the draft. If the user
 later asks to submit an existing draft, use cas_submit.
 
@@ -36,9 +45,9 @@ Write all titles, themes, descriptions, summaries, and reflection bodies in Engl
 Translate any supplied non-English title or prose. Use exact names from cas_list_clubs
 for the club field and the club's English name in the written text.
 Draft from facts supplied by the student. Ask for a missing date, club, or hours.
-Aim for 120–180 words in 1–2 paragraphs for an activity record. Describe what happened and
-what the student did, then close with a short reflection. Use 0 for omitted C/A/S
-categories once the student has provided their hours.
+For every activity record, follow this format: {RECORD_FORMAT}
+If the supplied facts are too sparse to write a complete record, ask what the student did.
+Use 0 for omitted C/A/S categories once the student has provided their hours.
 For a reflection, write a short title, a one-sentence summary of about 20 words, and
 a body grounded in the experience. The website aims for 600–750 words for club reflections
 and 250–350 for Conversation. Conversation is a semester reflection across C/A/S.
@@ -66,12 +75,35 @@ def english_form_text(value: str) -> str:
     return value
 
 
+@AfterValidator
+def activity_record_text(value: str) -> str:
+    word_count = len(re.findall(r"[^\W\d_]+(?:[’'-][^\W\d_]+)*", value))
+    if not RECORD_MIN_WORDS <= word_count <= RECORD_MAX_WORDS:
+        raise ValueError(
+            f"An activity record description must have {RECORD_MIN_WORDS}–{RECORD_MAX_WORDS} "
+            f"English words. This description has {word_count}."
+        )
+    paragraphs = [part for part in re.split(r"\n\s*\n", value) if part.strip()]
+    if len(paragraphs) > 2:
+        raise ValueError(
+            "An activity record description must have 1–2 paragraphs. "
+            f"This description has {len(paragraphs)}."
+        )
+    return value
+
+
 class Record(BaseModel):
     model_config = ConfigDict(extra="forbid")
     club: Club
     date: date
     theme: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=400), english_form_text]
-    description: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=5000), english_form_text]
+    description: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=5000),
+        english_form_text,
+        activity_record_text,
+        Field(description=RECORD_FORMAT),
+    ]
     c_hours: Hours = Decimal(0)
     a_hours: Hours = Decimal(0)
     s_hours: Hours = Decimal(0)
@@ -174,26 +206,35 @@ def create_server(
         account, _ = portal.credentials()
         return store.prepare(payload, account), payload
 
-    @server.tool(annotations=LOCAL_DRAFT)
+    @server.tool(
+        annotations=LOCAL_DRAFT,
+        description=(
+            "Stage English entries for review and show the full draft. For each activity record: "
+            f"{RECORD_FORMAT}"
+        ),
+    )
     def cas_prepare_submission(
         records: RecordBatch | None = None, reflections: ReflectionBatch | None = None
     ) -> dict[str, Any]:
-        """Stage English entries when the user asks to draft or review. Display the full draft in your reply."""
         draft_id, payload = prepare_draft(records, reflections)
         _, state, receipts = store.get(draft_id)
         return {
             **status(draft_id, state, receipts), "records": payload["record"], "reflections": payload["reflection"],
         }
 
-    @server.tool(annotations=PORTAL_WRITE)
+    @server.tool(
+        annotations=PORTAL_WRITE,
+        description=(
+            "Submit complete English entries when the user explicitly asks, including on the first turn. "
+            f"For each activity record: {RECORD_FORMAT} "
+            "Write and check every description before calling. If the activity details are too sparse, "
+            "ask what the student did. Use one record per date for weekly batches. "
+            "Show the full English text and actual receipts in the same reply."
+        ),
+    )
     async def cas_submit_entries(
         records: RecordBatch | None = None, reflections: ReflectionBatch | None = None
     ) -> dict[str, Any]:
-        """Submit complete English entries now when the user explicitly asks, including on the first turn.
-
-        Call directly without waiting for another confirmation. Show the full English article and
-        the actual school receipts in the same reply. Use one record per date for weekly batches.
-        """
         if read_only:
             raise ValueError("This CAS Monster instance was started in read-only mode.")
         draft_id, payload = prepare_draft(records, reflections)

@@ -17,7 +17,19 @@ from cas_portal import CasPortal
 
 RECORD = {
     "club": "Fixture Club", "date": "2026-11-07", "theme": "Model bridges",
-    "description": "We compared two models.", "c_hours": 1.25,
+    "description": (
+        "Our club built two paper bridges that spanned the same distance between tables. "
+        "I folded one sheet into a flat deck with raised edges and helped another student "
+        "make an accordion deck from the second sheet. We used identical sheets and put "
+        "the same number of coins on each bridge, starting in the middle and adding one "
+        "coin at a time. I kept a tally of how many coins each bridge held before the "
+        "center sagged.\n\n"
+        "When we finished, we compared the tally and examined where the paper had bent. "
+        "The accordion deck carried more coins in our test. I realized how easy it is "
+        "to overlook small differences between trials, so I would repeat the test before "
+        "drawing a conclusion about the two shapes."
+    ),
+    "c_hours": 1.25,
 }
 REFLECTION = {
     "club": "Conversation", "title": "Learning through testing", "summary": "I revised my design.",
@@ -129,7 +141,7 @@ class CasMcpTests(unittest.IsolatedAsyncioTestCase):
                 ("/Stu/Cas/SaveRecord", {
                     "id": "0", "GroupId": "7", "ActivityDate": "2026-11-07", "Theme": "Model bridges",
                     "CDuration": "1.25", "ADuration": "0", "SDuration": "0",
-                    "Reflection": "We compared two models.",
+                    "Reflection": RECORD["description"],
                 }),
                 ("/Stu/Cas/SaveReflection", {
                     "id": "0", "GroupId": "8", "Title": REFLECTION["title"], "Summary": REFLECTION["summary"],
@@ -173,6 +185,45 @@ class CasMcpTests(unittest.IsolatedAsyncioTestCase):
                 client, "cas_submit_entries", {"records": [RECORD], "reflections": [REFLECTION]},
             ), result)
             self.assertEqual(len(self.school.writes), 2)
+
+    async def test_record_format_is_enforced_before_drafting_or_writing(self):
+        async with create_connected_server_and_client_session(create_server(self.portal, self.store)) as client:
+            tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+            for name in ("cas_prepare_submission", "cas_submit_entries"):
+                self.assertIn("120–180 English words in 1–2 paragraphs", tools[name].description)
+                for description, error in (
+                    ("We compared two models.", "This description has 4."),
+                    (" ".join(["word"] * 119), "This description has 119."),
+                    (" ".join(["word"] * 181), "This description has 181."),
+                    ("\r\n \r\n".join([" ".join(["word"] * 40)] * 3), "1–2 paragraphs"),
+                ):
+                    with self.subTest(tool=name, error=error):
+                        invalid = await client.call_tool(name, {"records": [
+                            RECORD, {**RECORD, "date": "2026-11-14", "description": description},
+                        ]})
+                        self.assertTrue(invalid.isError)
+                        self.assertIn(error, invalid.content[0].text)
+                        self.assertEqual(self.school.writes, [])
+            for count in (120, 180):
+                result = await self.call(client, "cas_prepare_submission", {"records": [
+                    {**RECORD, "description": " ".join(["word"] * count)},
+                ]})
+                self.assertEqual(result["state"], "prepared")
+
+    async def test_existing_draft_with_short_description_is_not_posted(self):
+        draft_id = self.store.prepare({
+            "record": [RECORD, {
+                **RECORD, "date": "2026-11-14", "description": "We compared two models.",
+            }],
+            "reflection": [],
+        }, "fixture-user")
+        async with create_connected_server_and_client_session(create_server(self.portal, self.store)) as client:
+            result = await client.call_tool("cas_submit", {
+                "draft_id": draft_id, "confirmation": "submit_reviewed_draft",
+            })
+            self.assertTrue(result.isError)
+            self.assertIn("120–180 English words", result.content[0].text)
+            self.assertEqual(self.school.writes, [])
 
     async def test_form_rejects_non_latin_text_and_unknown_outcomes(self):
         async with create_connected_server_and_client_session(create_server(self.portal, self.store)) as client:

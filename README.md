@@ -228,7 +228,7 @@ qwen
 - **这轮直接提交**　即使是第一条消息，只要你明确说“请提交”且资料齐全，模型就会调用 `cas_submit_entries`，在同一轮提交并展示完整英文稿和每条回执。
 - **先看草稿**　说“请起草这条记录，先给我看”。模型会展示英文稿，等你之后明确要求提交再写入学校系统。
 
-活动标题、描述以及反思的标题、摘要和正文都用英文。表单的社团选项使用学校显示的原名。学校表单的八项 Learning Outcomes 为 Awareness、Challenge、Initiative、Collaboration、Commitment、Global Value、Ethics 和 New Skills。
+活动标题、描述以及反思的标题、摘要和正文都用英文。每条活动记录须写 120–180 个英文词，分 1–2 段。说明活动内容和自己做了什么，结尾简短反思。表单的社团选项使用学校显示的原名。学校表单的八项 Learning Outcomes 为 Awareness、Challenge、Initiative、Collaboration、Commitment、Global Value、Ethics 和 New Skills。
 
 批量填报时，每条记录都应对应实际活动。出现 `unknown` 回执时，先查学校记录确认该条是否已写入，再决定是否重新提交。
 
